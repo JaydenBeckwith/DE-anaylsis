@@ -1,0 +1,404 @@
+---
+title: "DGE_analysis_sem1"
+author: "jayden beckwith"
+date: "2023-03-02"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Libraries 
+
+```{r setup, include=TRUE}
+#libraries
+library(dplyr)
+library(tidyverse)
+library(DESeq2)
+library(biomaRt)
+library(tibble)
+library(EnhancedVolcano)
+library(ComplexHeatmap)
+library(ggplot2)
+library(data.table)
+library(ggrepel)
+library(reticulate)
+library(VennDiagram)
+library(plotly)
+library(limma)
+library(ggpubr)
+library(edgeR)
+library(gridExtra)
+library(statmod)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(OUTRIDER)
+```
+
+### rep dfs
+
+creating dfs of technical replicates - 8 technical reps - 3 batches - muscle/blood
+
+```{r}
+test_meta <- fread("test_metadata_DGE_checkpoint.csv")
+meta_df <- test_meta[,1:7]
+meta_df
+```
+```{r}
+test_count_mat <- fread('final_count_mat.csv')
+test_counts <- data.frame(test_count_mat)
+test_counts
+
+#check for any dups - if any get index
+anyDuplicated(test_counts$Geneid)
+test_counts$Geneid[which(duplicated(test_counts$Geneid))]
+```
+```{r}
+#drop dup and impute null counts as 0
+test_dup <- test_counts[-14998, ]
+test_dups <- data.frame(test_dup, row.names = 1)
+test_dups[is.na(test_dups)] <- 0
+test_dups
+```
+
+###  Collapse replciates
+```{r}
+#factor cols and relevel
+meta_df$BATCH<- factor(meta_df$BATCH)
+
+meta_df$COLLECTION_TYPE <- factor(meta_df$COLLECTION_TYPE)
+
+meta_df$MND <- factor(meta_df$MND)
+
+
+meta_df$SEX <- factor(meta_df$SEX)
+meta_df
+```
+```{r}
+#create deseq2 matrix and design 
+dds <- DESeqDataSetFromMatrix(countData = test_dups,
+                              colData = meta_df,
+                              #account for batch effect 
+                              design = ~ BATCH + MND)
+
+#collapse technical replicates
+dds_cols <- collapseReplicates(dds, dds$ID, dds$RUN)
+dds_cols
+```
+
+### Data preprocessing and exploratory analyses 
+
+```{r}
+#filter lowly expressed genes 
+keep <- rowSums(counts(dds_cols)) >= 10
+dds_cols <- dds_cols[keep,]
+dds_cols
+
+#re-level and set MND status ref as control 
+dds_cols$MND<- relevel(dds_cols$MND, ref = "Control")
+dds_cols$MND
+```
+## PCA / scaling / normalisation / log transformation 
+
+```{r}
+#perform scaling 
+est_dds <- estimateSizeFactors(dds_cols)
+
+#normalise data and summarise cols for PCA
+se <- SummarizedExperiment(log2(counts(est_dds, normalized=TRUE) + 1),
+                           colData=colData(est_dds))
+#plot PCA 
+pca_d1 <- plotPCA(DESeqTransform(se), intgroup=c("COLLECTION_TYPE", "SEX", "MND"), returnData=TRUE)
+
+percentVar <- round(100 * attr(pca_d1, "percentVar"))
+pca_plot <- ggplot(pca_d1, aes(PC1, PC2, color=MND, shape=SEX, group=COLLECTION_TYPE)) +
+  geom_point(size=2) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed() + 
+  ggtitle("PCA of PAX Blood vs Muscle Biopsy Samples") + 
+  theme(plot.title = element_text(hjust = 0.5)) + stat_ellipse(linetype=2, aes(PC1, PC2, color=COLLECTION_TYPE)) + stat_ellipse(linetype=2, aes(PC1, PC2, color=COLLECTION_TYPE)) 
+```
+
+
+
+```{r}
+pca_plot
+```
+
+### check for batch effects - VST
+
+```{r}
+vst <- vst(est_dds)
+
+plotPCA(vst, intgroup=c("BATCH", "MND"))
+
+assay(vst) <- limma::removeBatchEffect(assay(vst), vst$BATCH)
+
+plotPCA(vst, intgroup=c("BATCH", "MND"))
+```
+##Filt Blood & Muscle
+
+```{r}
+filt_b <- est_dds[,est_dds$COLLECTION_TYPE == "Pax"]
+
+#filter muscle
+filt_mu <- est_dds[,est_dds$COLLECTION_TYPE == "Muscle"]
+filt_mu
+```
+##PCA Blood and Muscle No Batch Effect
+```{r}
+vst_blood <- vst(filt_b)
+
+plotPCA(vst_blood, intgroup=c( "MND", "SEX"))
+
+assay(vst_blood) <- limma::removeBatchEffect(assay(vst_blood), vst_blood$BATCH)
+
+blood_pca <- plotPCA(vst_blood, intgroup=c( "MND", "SEX"), returnData = T)
+
+percentVar <- round(100 * attr(blood_pca, "percentVar"))
+pca_blood <- ggplot(blood_pca, aes(PC1, PC2, color=MND, shape=SEX)) +
+  geom_point(size=2) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed() + 
+  ggtitle("PCA of Blood") + 
+  theme(plot.title = element_text(hjust = 0.5)) #+ 
+  #stat_ellipse(
+   # data = blood_pca, aes(fill = factor(MND)),
+   # geom = "polygon", alpha = 0.1, level = .95, type = "t", linetype = 2, show.legend = F
+ # ) 
+
+##PCA muscle 
+vst_muscle <- vst(filt_mu)
+
+plotPCA(vst_muscle, intgroup=c( "MND", "SEX"))
+
+assay(vst_muscle) <- limma::removeBatchEffect(assay(vst_muscle), vst_muscle$BATCH)
+
+muscle_pca <- plotPCA(vst_muscle, intgroup=c( "MND", "SEX"), returnData = T)
+
+percentVar <- round(100 * attr(muscle_pca, "percentVar"))
+pca_Muscle <- ggplot(muscle_pca, aes(PC1, PC2, color=MND, shape=SEX)) +
+  geom_point(size=2) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed() + 
+  ggtitle("PCA of Muscle") + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+#+ 
+ # stat_ellipse(
+    #data = muscle_pca, aes(fill = factor(MND)),
+    #geom = "polygon", alpha = 0.1, level = .95, type = "t", linetype = 2, show.legend = F
+ # ) 
+
+#join plot
+ggarrange(pca_blood, pca_Muscle, ncol =2, align = "h", common.legend = TRUE, legend="bottom")
+```
+
+##DGE Analysis - Whole Dataset
+
+
+```{r}
+deseqdds <- DESeq(est_dds)
+``` 
+
+```{r}
+dseq_res <- DESeq2::results(deseqdds)
+```
+
+```{r}
+summary(dseq_res)
+```
+```{r}
+resultsNames(deseqdds)
+```
+```{r}
+res.05 <- DESeq2::results(deseqdds)
+table(res.05$padj < 0.05)
+```
+```{r}
+#set dseq results as df
+dseq_df <- as.data.frame(dseq_res)
+
+head(dseq_df)
+```
+
+```{r}
+#use tibble to set rowname to col for edit
+df <- tibble::rownames_to_column(dseq_df, "ID")
+#need to be trimmed using regex and tidy for ensembl ids 
+count_trim <- df %>% mutate(ensembl_gene_id = gsub("\\..*","", ID))
+nrow(count_trim)
+head(count_trim)
+
+#BIomart db - get annotations 
+listMarts()
+
+ensembl=useMart("ENSEMBL_MART_ENSEMBL")
+listDatasets(ensembl) %>% filter(grepl("Human",description))
+
+ensembl.con <- useMart("ensembl", dataset = "hsapiens_gene_ensembl", host="https://useast.ensembl.org")
+attr <- listAttributes(ensembl.con)
+filters <- listFilters(ensembl.con)
+
+#id, gene type, gene name
+gene_df <- as.data.frame(getBM(attributes = c('ensembl_gene_id',"gene_biotype", 'external_gene_name'),
+      filters="ensembl_gene_id",
+      values = count_trim$ensembl_gene_id,
+      mart = ensembl.con))
+
+#merge dfs via ensemble ids 
+ensembl_DEGs <- merge(count_trim, gene_df, by='ensembl_gene_id', all='TRUE')
+#filt nans
+filt_ensembl <- drop_na(ensembl_DEGs)
+filt_ensembl <- data.frame(filt_ensembl, row.names = 2)
+#filt_ensembl <- filt_ensembl %>% distinct(external_gene_name, .keep_all = TRUE)
+head(filt_ensembl)
+
+```
+## Upregulated and downregulated genes
+
+```{r}
+#upregulated genes at LFC > 1 threshold and sig by p adj
+upreg <- filt_ensembl %>% filter(log2FoldChange > 1 & padj < 0.05)
+#no upreg genes
+nrow(upreg)
+
+downreg <- filt_ensembl %>% filter(log2FoldChange < -1 & padj < 0.05)
+nrow(downreg)
+
+```
+```{r}
+#dispersion plot
+plotDispEsts(deseqdds, main='Dispersion Plot')
+```
+```{r}
+DESeq2::plotMA(dseq_res, ylim=c(-2,2))
+```
+
+##Whole data - Top 50 DEGs
+
+```{r}
+#subset to get only protein coding genes
+pc_genes <- subset(filt_ensembl, gene_biotype=='protein_coding')
+
+#get top 50 protein coding DEGs
+top_50_genes <- head(pc_genes[order(pc_genes$padj),], 50)
+#set as df
+top_50_genes <- as.data.frame(top_50_genes)
+top_50_genes
+```
+##Volcano Plot of PCGs
+
+```{r Volcano1, fig.height = 8, fig.width = 6.5, fig.align = "center"}
+lab_italics <- paste0("italic('", lab = pc_genes$external_gene_name, "')")
+  selectLab_italics = paste0(
+    "italic('",
+    c('COL19A1', "SAA1","SAA2","CDKN1A", "FGFBP2"),
+    "')")
+
+d1 <- EnhancedVolcano(pc_genes,
+    lab = lab_italics,
+    x = 'log2FoldChange',
+    y = 'padj',
+    selectLab = selectLab_italics,
+    xlab = bquote(~Log[2]~ 'fold change'),
+    pCutoff = 1e-4,
+    title = 'Volcano Plot',
+    FCcutoff = 1.0,
+    pointSize = 3.0,
+    labSize = 6.0,
+    labCol = 'black',
+    labFace = 'bold',
+    boxedLabels = TRUE,
+    parseLabels = TRUE,
+    colAlpha = 4/5,
+    legendPosition = 'bottom',
+    legendLabSize = 14,
+    legendIconSize = 4.0,
+    drawConnectors = TRUE,
+    widthConnectors = 1.0,
+    colConnectors = 'black')
+
+
+d1
+```
+
+```{r}
+#normalise counts for matrix 
+mat <- counts(deseqdds, normalized = T)[rownames(top_50_genes),]
+#get zscores for new matrix scale by 1 when transposing 
+mat_z <- t(apply(mat,1,scale))
+#set col names for new df
+colnames(mat_z) <-rownames(dds_cols@metadata)
+rownames(mat_z) <- top_50_genes$external_gene_name
+```
+
+
+```{r}
+
+ann <- data.frame(SEX = dds_cols$SEX,
+                  ALS= dds_cols$MND, 
+                  COLLECTION_TYPE = dds_cols$COLLECTION_TYPE, stringsAsFactors = F)
+
+colours <- list(
+    SEX = c('Male' = 'blue', 'Female' = 'green'),
+    ALS = c("Case" = "yellow","Control" = "orange"),
+    COLLECTION_TYPE = c("Pax" = "purple", "Muscle" = "pink"))
+colAnn <- HeatmapAnnotation(
+    df = ann,
+    which = "col", # 'col' (samples) or 'row' (gene) annotation?
+    na_col = 'white', # default colour for any NA values in the annotation data-frame, 'ann'
+    col = colours,
+    annotation_height = 0.6,
+    annotation_width = unit(1, 'cm'),
+    gap = unit(1, 'mm'),
+    annotation_legend_param = list(
+      SEX = list(
+        nrow = 1, # number of rows across which the legend will be arranged
+        title = 'Sex',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 8, fontface='bold'),
+        labels_gp = gpar(fontsize = 8)),
+      ALS = list(
+        nrow = 1, # number of rows across which the legend will be arranged
+        title = 'ALS',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 8, fontface = "bold"),
+        labels_gp = gpar(fontsize = 8)),
+      COLLECTION_TYPE = list(
+        nrow = 1, # number of rows across which the legend will be arranged
+        title = 'Tissue',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 8, fontface = "bold"),
+        labels_gp = gpar(fontsize = 8))
+      ))
+
+#make heatmap for clustering 
+DGE_heatmap <- Heatmap(mat_z, 
+                       cluster_rows = T, 
+                       cluster_columns = T, 
+                       column_labels = colnames(mat_z),
+                       name = "z-score",
+                       column_title = "Samples",
+                       row_title = "Genes", 
+                       show_row_names = T,
+                       show_column_names = F,
+                       top_annotation = colAnn)
+
+DGE_heatmap
+```
+##Blood DGE analysis
+
+```{r}
+blood_deseq <- DESeq(filt_b)
+```
+
+
+
