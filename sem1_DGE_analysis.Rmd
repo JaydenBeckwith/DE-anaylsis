@@ -27,12 +27,16 @@ library(reticulate)
 library(VennDiagram)
 library(plotly)
 library(limma)
+library(rstatix)
 library(ggpubr)
 library(edgeR)
 library(gridExtra)
 library(statmod)
+library(affy)
+library(scales)
 library(clusterProfiler)
 library(org.Hs.eg.db)
+library(variancePartition)
 library(AnnotationDbi)
 library(OUTRIDER)
 ```
@@ -63,7 +67,7 @@ test_dups[is.na(test_dups)] <- 0
 test_dups
 ```
 
-###  Collapse replciates
+###  Collapse replciates and factor meta
 ```{r}
 #factor cols and relevel
 meta_df$BATCH<- factor(meta_df$BATCH)
@@ -72,16 +76,18 @@ meta_df$COLLECTION_TYPE <- factor(meta_df$COLLECTION_TYPE)
 
 meta_df$MND <- factor(meta_df$MND)
 
+meta_df$AGE <- factor(meta_df$AGE)
 
 meta_df$SEX <- factor(meta_df$SEX)
-meta_df
+
+meta_df$ID <- factor(meta_df$ID)
 ```
 ```{r}
 #create deseq2 matrix and design 
 dds <- DESeqDataSetFromMatrix(countData = test_dups,
                               colData = meta_df,
                               #account for batch effect 
-                              design = ~ BATCH + MND)
+                              design = ~ BATCH + SEX + MND)
 
 #collapse technical replicates
 dds_cols <- collapseReplicates(dds, dds$ID, dds$RUN)
@@ -92,7 +98,7 @@ dds_cols
 
 ```{r}
 #filter lowly expressed genes 
-keep <- rowSums(counts(dds_cols)) >= 10
+keep <- rowSums(counts(dds_cols) >= 10) >= 3
 dds_cols <- dds_cols[keep,]
 dds_cols
 
@@ -100,11 +106,24 @@ dds_cols
 dds_cols$MND<- relevel(dds_cols$MND, ref = "Control")
 dds_cols$MND
 ```
-## PCA / scaling / normalisation / log transformation 
+## Expression distribution
 
 ```{r}
-#perform scaling 
+#estimate library sizes 
 est_dds <- estimateSizeFactors(dds_cols)
+
+myColors <- hue_pal()(4)
+
+count_s1 <- counts(est_dds, normalized=TRUE)
+## Plot the log2-transformed data with a +1 pseudocount
+plotDensity(log2(count_s1 + 1), col=rep(myColors, each=3),
+            lty=c(1:ncol(count_s1 )), xlab='Log2(normalised count + 1)',
+            main='Expression Distribution')
+```
+
+## PCA and experiment summary
+
+```{r}
 
 #normalise data and summarise cols for PCA
 se <- SummarizedExperiment(log2(counts(est_dds, normalized=TRUE) + 1),
@@ -165,7 +184,7 @@ pca_blood <- ggplot(blood_pca, aes(PC1, PC2, color=MND, shape=SEX)) +
   ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
   coord_fixed() + 
   ggtitle("PCA of Blood") + 
-  theme(plot.title = element_text(hjust = 0.5)) #+ 
+  theme(plot.title = element_text(hjust = 0.5)) + theme_bw() 
   #stat_ellipse(
    # data = blood_pca, aes(fill = factor(MND)),
    # geom = "polygon", alpha = 0.1, level = .95, type = "t", linetype = 2, show.legend = F
@@ -187,7 +206,7 @@ pca_Muscle <- ggplot(muscle_pca, aes(PC1, PC2, color=MND, shape=SEX)) +
   ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
   coord_fixed() + 
   ggtitle("PCA of Muscle") + 
-  theme(plot.title = element_text(hjust = 0.5)) 
+  theme(plot.title = element_text(hjust = 0.5)) + theme_bw()
 #+ 
  # stat_ellipse(
     #data = muscle_pca, aes(fill = factor(MND)),
@@ -197,7 +216,52 @@ pca_Muscle <- ggplot(muscle_pca, aes(PC1, PC2, color=MND, shape=SEX)) +
 #join plot
 ggarrange(pca_blood, pca_Muscle, ncol =2, align = "h", common.legend = TRUE, legend="bottom")
 ```
+##ALS genes from literature - Case Vs Control 
 
+```{r}
+
+#a <- filt_ensembl[filt_ensembl$external_gene_name == c('FUS'),]
+#a
+#UNC13A, SOD1, TARDBP, FUS 
+check.vec <- c("ENSG00000120948.19", "ENSG00000130477.16", "ENSG00000142168.15", "ENSG00000089280.19")
+check.vec
+
+#transpose and get norm logged counts 
+tcounts <- t(log2((counts(est_dds[check.vec, ], normalized=TRUE, replaced=FALSE)+1))) %>%
+  merge(colData(est_dds), ., by="row.names") %>%
+  gather(gene, expression, (ncol(.)-length(check.vec)+1):ncol(.))
+
+#add gene annotation
+t <- tcounts %>% mutate(ensembl_gene_id = gsub("\\..*","", gene))
+
+ensembl=useMart("ENSEMBL_MART_ENSEMBL")
+listDatasets(ensembl) %>% filter(grepl("Human",description))
+
+ensembl.con <- useMart("ensembl", dataset = "hsapiens_gene_ensembl", host="https://useast.ensembl.org")
+attr <- listAttributes(ensembl.con)
+filters <- listFilters(ensembl.con)
+
+t_names <- as.data.frame(getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+      filters="ensembl_gene_id",
+      values = t$ensembl_gene_id,
+      mart = ensembl.con))
+
+merged_T <- merge(t, t_names, by='ensembl_gene_id', all='TRUE')
+merged_T
+
+#plot and wrap
+t_names
+p <- ggplot(merged_T, aes(MND, expression, fill=COLLECTION_TYPE)) + 
+  geom_boxplot() + 
+  facet_wrap(~external_gene_name, scales="free_y") + 
+  labs(x="ALS status", 
+       y="Expression (log normalised counts)", 
+       fill="Tissue")
+
+#t-test with pairwise comparison 
+comparison <- list(c("Control", "Case"))
+p + stat_compare_means(method = "t.test", label.y = 11.5, label = "p.format") + stat_compare_means(comparisons = comparison) + theme_bw()
+```
 ##DGE Analysis - Whole Dataset
 
 
@@ -259,6 +323,8 @@ filt_ensembl <- data.frame(filt_ensembl, row.names = 2)
 head(filt_ensembl)
 
 ```
+
+
 ## Upregulated and downregulated genes
 
 ```{r}
@@ -266,7 +332,7 @@ head(filt_ensembl)
 upreg <- filt_ensembl %>% filter(log2FoldChange > 1 & padj < 0.05)
 #no upreg genes
 nrow(upreg)
-
+upreg
 downreg <- filt_ensembl %>% filter(log2FoldChange < -1 & padj < 0.05)
 nrow(downreg)
 
@@ -277,6 +343,20 @@ plotDispEsts(deseqdds, main='Dispersion Plot')
 ```
 ```{r}
 DESeq2::plotMA(dseq_res, ylim=c(-2,2))
+```
+
+##Hypothesis weighting 
+
+```{r}
+#suppressPackageStartupMessages(library(IHW))
+
+#res.ihw <- DESeq2::results(deseqdds, filterFun = ihw)
+#summary(res.ihw)
+```
+```{r}
+#ihw.obj <- metadata(res.ihw)$ihwResult
+#plot(ihw.obj)
+#plot(ihw.obj, what = "decisionboundary") 
 ```
 
 ##Whole data - Top 50 DEGs
@@ -337,17 +417,18 @@ colnames(mat_z) <-rownames(dds_cols@metadata)
 rownames(mat_z) <- top_50_genes$external_gene_name
 ```
 
+## DEG Heatmap
 
 ```{r}
 
-ann <- data.frame(SEX = dds_cols$SEX,
+ann <- data.frame(Sex = dds_cols$SEX,
                   ALS= dds_cols$MND, 
-                  COLLECTION_TYPE = dds_cols$COLLECTION_TYPE, stringsAsFactors = F)
+                  Tissue = dds_cols$COLLECTION_TYPE, stringsAsFactors = F)
 
 colours <- list(
-    SEX = c('Male' = 'blue', 'Female' = 'green'),
+    Sex = c('Male' = 'blue', 'Female' = 'green'),
     ALS = c("Case" = "yellow","Control" = "orange"),
-    COLLECTION_TYPE = c("Pax" = "purple", "Muscle" = "pink"))
+    Tissue = c("Pax" = "purple", "Muscle" = "pink"))
 colAnn <- HeatmapAnnotation(
     df = ann,
     which = "col", # 'col' (samples) or 'row' (gene) annotation?
@@ -357,7 +438,7 @@ colAnn <- HeatmapAnnotation(
     annotation_width = unit(1, 'cm'),
     gap = unit(1, 'mm'),
     annotation_legend_param = list(
-      SEX = list(
+      Sex = list(
         nrow = 1, # number of rows across which the legend will be arranged
         title = 'Sex',
         title_position = 'topcenter',
@@ -371,7 +452,7 @@ colAnn <- HeatmapAnnotation(
         legend_direction = 'vertical',
         title_gp = gpar(fontsize = 8, fontface = "bold"),
         labels_gp = gpar(fontsize = 8)),
-      COLLECTION_TYPE = list(
+      Tissue = list(
         nrow = 1, # number of rows across which the legend will be arranged
         title = 'Tissue',
         title_position = 'topcenter',
@@ -394,11 +475,123 @@ DGE_heatmap <- Heatmap(mat_z,
 
 DGE_heatmap
 ```
-##Blood DGE analysis
-
+##Check DEG SAA1, SAA2, SAA2-SAA4
 ```{r}
-blood_deseq <- DESeq(filt_b)
+##Investigate SAA1, SAA2, SAA2-SAA4 
+#a <- filt_ensembl[filt_ensembl$external_gene_name == c('MYH3'),]
+#a
+#UNC13A, SOD1, TARDBP, FUS 
+check.vec_SAA <- c("ENSG00000173432.13", "ENSG00000134339.9", "ENSG00000255071.3")
+check.vec_SAA
+
+#transpose and get norm logged counts 
+tcounts_saa <- t(log2((counts(est_dds[check.vec_SAA, ], normalized=TRUE, replaced=FALSE)+1))) %>%
+  merge(colData(est_dds), ., by="row.names") %>%
+  gather(gene, expression, (ncol(.)-length(check.vec_SAA)+1):ncol(.))
+
+#add gene annotation
+t_saa <- tcounts_saa %>% mutate(ensembl_gene_id = gsub("\\..*","", gene))
+
+ensembl=useMart("ENSEMBL_MART_ENSEMBL")
+listDatasets(ensembl) %>% filter(grepl("Human",description))
+
+ensembl.con <- useMart("ensembl", dataset = "hsapiens_gene_ensembl", host="https://useast.ensembl.org")
+attr <- listAttributes(ensembl.con)
+filters <- listFilters(ensembl.con)
+
+t_names_saa <- as.data.frame(getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+      filters="ensembl_gene_id",
+      values = t$ensembl_gene_id,
+      mart = ensembl.con))
+t_names_saa
+
+merged_T_saa <- merge(t_saa, t_names_saa, by='ensembl_gene_id', all='TRUE')
+merged_T_saa
+
+#plot and wrap
+p_saa <- ggplot(merged_T, aes(MND, expression, fill=SEX)) + 
+  geom_boxplot() + 
+  facet_wrap(~external_gene_name, scales="free_y") + 
+  labs(x="ALS status", 
+       y="Expression (log normalised counts)", 
+       fill="Sex")
+
+#t-test with pairwise comparison 
+comparison_saa <- list(c("Control", "Case"))
+p_saa + stat_compare_means(method = "t.test", label.y = 11.5, label = "p.format") + stat_compare_means(comparisons = comparison_saa) + theme_bw()
+
+
 ```
 
+
+
+##GO - DEGs
+
+```{r}
+GO_DEGs <- top_50_genes$ensembl_gene_id
+GO <- enrichGO(gene = GO_DEGs, OrgDb = "org.Hs.eg.db", key = "ENSEMBL", ont = "ALL")
+GO %>% as.data.frame()
+GO
+dotplot(GO, title=" Differentially Expressed Genes") + facet_grid(ONTOLOGY~., scales="free")
+```
+## GO - Upregulated Genes
+```{r}
+pc_upreg <- upreg %>% filter(gene_biotype == 'protein_coding')
+GO_upreg <- pc_upreg$ensembl_gene_id
+GO_d <- enrichGO(gene = GO_upreg, OrgDb = "org.Hs.eg.db", key = "ENSEMBL", ont = "ALL")
+GO_d %>% as.data.frame()
+dotplot(GO_d, title="Upregulated Differentially Expressed Genes")
+```
+
+## GO - Downregulated Genes
+```{r}
+pc_downreg <- downreg %>% filter(gene_biotype == 'protein_coding')
+GO_downreg <- pc_downreg$ensembl_gene_id
+GO_d <- enrichGO(gene = GO_downreg, OrgDb = "org.Hs.eg.db", key = "ENSEMBL", ont = "ALL")
+GO_d %>% as.data.frame()
+dotplot(GO_d, title="Downregulated Differentially Expressed Genes")
+```
+
+##KEGG
+```{r}
+##Investigate SAA1, SAA2, SAA2-SAA4 
+
+#human search
+human_db <- search_kegg_organism('hsa', by='kegg_code')
+
+human_db
+```
+```{r}
+library(KEGGREST)
+library(pathview)
+org <- keggList("organism")
+head(org)
+```
+
+
+
+```{r}
+x<- top_50_genes$external_gene_name
+#x <- c("SAA2", "SAA1", "SAA2-SAA4")
+x
+brit <- bitr(x, "SYMBOL", "ENTREZID", OrgDb = org.Hs.eg.db)
+y <- brit$ENTREZID
+#y <- c("6289", "6288", "100528017")
+y <- as.character(y)
+yy <- bitr_kegg(y, fromType = "kegg", toType = "Module", organism = "hsa")
+yy
+
+keggLink("pathway", c("hsa:5214", "hsa:3706"))
+
+pathways <- keggList("pathway", "hsa")
+head(pathways)
+
+map <- gsub("path:", "", names(pathways)[2])
+map# remove 'path:'
+pv.out <- pathview(gene.data = gene.data, cpd.data = y, gene.idtype = "KEGG", 
+    pathway.id = map, species = "hsa", out.suffix = map, keys.align = "y", 
+    kegg.native = T, match.data = T, key.pos = "topright")
+plot.name <- paste(map, map, "png", sep = ".")
+```
 
 
