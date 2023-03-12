@@ -590,7 +590,7 @@ gse <- gseGO(geneList=gene_list,
 
 ```{r}
 require(DOSE)
-dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
+dotplot(gse, showCategory=20, split=".sign") + facet_grid(.~.sign)
 ```
 ```{r}
 library(enrichplot)
@@ -599,16 +599,13 @@ gseaplot2(gse, title = gse$Description[36], geneSetID = 36)
 ```
 
 ```{r}
-library(ggupset)
+
 edox <- setReadable(gse, 'org.Hs.eg.db', 'auto')
 edox
 p1 <- cnetplot(edox, foldChange=gene_list)
 p1
-```
-```{r}
-upsetplot(gse)
-```
 
+```
 
 
 ```{r}
@@ -644,19 +641,39 @@ kegg_gene_list = sort(kegg_gene_list, decreasing = TRUE)
 kegg_gene_list
 ```
 ```{r}
-kegg_organism = "hsa"
-kk2 <- gseKEGG(geneList     = kegg_gene_list,
-               organism     = kegg_organism,
-               nPerm        = 10000,
-               minGSSize    = 3,
-               maxGSSize    = 800,
-               pvalueCutoff = 0.05,
-               pAdjustMethod = "BH")
+library(KEGGREST)
+hsa_pathways <- keggList("pathway", "hsa") %>% 
+    tibble(pathway = names(.), description = .)
+hsa_pathways
+```
+```{r}
 
-bitr_kegg(names(kegg_gene_list), fromType = "kegg", toType = "Path", organism = "hsa")
+hsa_path_eg  <- keggLink("pathway", "hsa") %>% 
+    tibble(pathway = ., eg = sub("hsa:", "", names(.)))
 
-kk3 <- enrichKEGG(gene = names(kegg_gene_list), org = 'hsa')
-kk3
+hsa_kegg_anno <- hsa_path_eg %>%
+    mutate(
+        symbol = mapIds(org.Hs.eg.db, eg, "SYMBOL", "ENTREZID"),
+        ensembl = mapIds(org.Hs.eg.db, eg, "ENSEMBL", "ENTREZID")
+    )
+
+hsa_kegg_anno[hsa_kegg_anno$symbol == "COL19A1",]
+
+hsa_kegg_anno
+
+```
+```{r}
+hsa_pathways[hsa_pathways$pathway == "hsa04974",]
+```
+
+
+
+
+```{r}
+library(pathview)
+
+# Produce the native KEGG plot (PNG)
+dme <- pathview(gene.data=kegg_gene_list, pathway.id="hsa04012", species = kegg_organism)
 ```
 
 
