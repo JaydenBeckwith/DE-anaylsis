@@ -552,46 +552,53 @@ GO_d %>% as.data.frame()
 dotplot(GO_d, title="Downregulated Differentially Expressed Genes")
 ```
 
-##KEGG
+##GSEA
 ```{r}
-##Investigate SAA1, SAA2, SAA2-SAA4 
-
-#human search
-human_db <- search_kegg_organism('hsa', by='kegg_code')
-
-human_db
+#get top 50 protein coding DEGs
+gsea_genes<- head(pc_genes[order(pc_genes$padj),], 150)
+gsea_genes
 ```
 ```{r}
-library(KEGGREST)
-library(pathview)
-org <- keggList("organism")
-head(org)
+organism = "org.Hs.eg.db"
+# we want the log2 fold change 
+original_gene_list <- gsea_genes$log2FoldChange
+
+# name the vector
+names(original_gene_list) <- gsea_genes$ensembl_gene_id
+
+# omit any NA values 
+gene_list<-na.omit(original_gene_list)
+
+# sort the list in decreasing order (required for clusterProfiler)
+gene_list = sort(gene_list, decreasing = TRUE)
+
+gse <- gseGO(geneList=gene_list, 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             nPerm = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = organism, 
+             pAdjustMethod = "none")
 ```
-
-
 
 ```{r}
-x<- top_50_genes$external_gene_name
-#x <- c("SAA2", "SAA1", "SAA2-SAA4")
-x
-brit <- bitr(x, "SYMBOL", "ENTREZID", OrgDb = org.Hs.eg.db)
-y <- brit$ENTREZID
-#y <- c("6289", "6288", "100528017")
-y <- as.character(y)
-yy <- bitr_kegg(y, fromType = "kegg", toType = "Module", organism = "hsa")
-yy
-
-keggLink("pathway", c("hsa:5214", "hsa:3706"))
-
-pathways <- keggList("pathway", "hsa")
-head(pathways)
-
-map <- gsub("path:", "", names(pathways)[2])
-map# remove 'path:'
-pv.out <- pathview(gene.data = gene.data, cpd.data = y, gene.idtype = "KEGG", 
-    pathway.id = map, species = "hsa", out.suffix = map, keys.align = "y", 
-    kegg.native = T, match.data = T, key.pos = "topright")
-plot.name <- paste(map, map, "png", sep = ".")
+require(DOSE)
+dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
 ```
+```{r}
+gse$Description
+gseaplot(gse, by = "all", title = gse$Description[16], geneSetID = 16)
+```
+
+```{r}
+cnetplot(gse, categorySize="pvalue", foldChange=gene_list)
+```
+```{r}
+ridgeplot(gse) + labs(x = "enrichment distribution")
+```
+
 
 
