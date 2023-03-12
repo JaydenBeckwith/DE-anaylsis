@@ -480,7 +480,7 @@ DGE_heatmap
 ##Investigate SAA1, SAA2, SAA2-SAA4 
 #a <- filt_ensembl[filt_ensembl$external_gene_name == c('MYH3'),]
 #a
-#UNC13A, SOD1, TARDBP, FUS 
+#
 check.vec_SAA <- c("ENSG00000173432.13", "ENSG00000134339.9", "ENSG00000255071.3")
 check.vec_SAA
 
@@ -489,8 +489,11 @@ tcounts_saa <- t(log2((counts(est_dds[check.vec_SAA, ], normalized=TRUE, replace
   merge(colData(est_dds), ., by="row.names") %>%
   gather(gene, expression, (ncol(.)-length(check.vec_SAA)+1):ncol(.))
 
+tcounts_saa
+
 #add gene annotation
 t_saa <- tcounts_saa %>% mutate(ensembl_gene_id = gsub("\\..*","", gene))
+t_saa
 
 ensembl=useMart("ENSEMBL_MART_ENSEMBL")
 listDatasets(ensembl) %>% filter(grepl("Human",description))
@@ -501,7 +504,7 @@ filters <- listFilters(ensembl.con)
 
 t_names_saa <- as.data.frame(getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
       filters="ensembl_gene_id",
-      values = t$ensembl_gene_id,
+      values = t_saa$ensembl_gene_id,
       mart = ensembl.con))
 t_names_saa
 
@@ -509,12 +512,13 @@ merged_T_saa <- merge(t_saa, t_names_saa, by='ensembl_gene_id', all='TRUE')
 merged_T_saa
 
 #plot and wrap
-p_saa <- ggplot(merged_T, aes(MND, expression, fill=SEX)) + 
+p_saa <- ggplot(merged_T_saa, aes(MND, expression, fill=SEX)) + 
   geom_boxplot() + 
   facet_wrap(~external_gene_name, scales="free_y") + 
   labs(x="ALS status", 
        y="Expression (log normalised counts)", 
        fill="Sex")
+
 
 #t-test with pairwise comparison 
 comparison_saa <- list(c("Control", "Case"))
@@ -555,7 +559,7 @@ dotplot(GO_d, title="Downregulated Differentially Expressed Genes")
 ##GSEA
 ```{r}
 #get top 50 protein coding DEGs
-gsea_genes<- head(pc_genes[order(pc_genes$padj),], 150)
+gsea_genes<- head(pc_genes[order(pc_genes$padj),], 200)
 gsea_genes
 ```
 ```{r}
@@ -589,15 +593,70 @@ require(DOSE)
 dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
 ```
 ```{r}
+library(enrichplot)
 gse$Description
-gseaplot(gse, by = "all", title = gse$Description[16], geneSetID = 16)
+gseaplot2(gse, title = gse$Description[36], geneSetID = 36)
 ```
 
 ```{r}
-cnetplot(gse, categorySize="pvalue", foldChange=gene_list)
+library(ggupset)
+edox <- setReadable(gse, 'org.Hs.eg.db', 'auto')
+edox
+p1 <- cnetplot(edox, foldChange=gene_list)
+p1
 ```
 ```{r}
+upsetplot(gse)
+```
+
+
+
+```{r}
 ridgeplot(gse) + labs(x = "enrichment distribution")
+```
+
+###KEGG
+
+```{r}
+# Convert gene IDs for gseKEGG function
+# We will lose some genes here because not all IDs will be converted
+ids<-bitr(names(original_gene_list), fromType = "ENSEMBL", toType = "ENTREZID", OrgDb=organism)
+ # remove duplicate IDS (here I use "ENSEMBL", but it should be whatever was selected as keyType)
+dedup_ids = ids[!duplicated(ids[c("ENSEMBL")]),]
+
+# Create a new dataframe df2 which has only the genes which were successfully mapped using the bitr function above
+df2 = gsea_genes[gsea_genes$ensembl_gene_id %in% dedup_ids$ENSEMBL,]
+
+# Create a new column in df2 with the corresponding ENTREZ IDs
+df2$Y = dedup_ids$ENTREZID
+
+# Create a vector of the gene unuiverse
+kegg_gene_list <- df2$log2FoldChange
+
+# Name vector with ENTREZ ids
+names(kegg_gene_list) <- df2$Y
+
+# omit any NA values 
+kegg_gene_list<-na.omit(kegg_gene_list)
+
+# sort the list in decreasing order (required for clusterProfiler)
+kegg_gene_list = sort(kegg_gene_list, decreasing = TRUE)
+kegg_gene_list
+```
+```{r}
+kegg_organism = "hsa"
+kk2 <- gseKEGG(geneList     = kegg_gene_list,
+               organism     = kegg_organism,
+               nPerm        = 10000,
+               minGSSize    = 3,
+               maxGSSize    = 800,
+               pvalueCutoff = 0.05,
+               pAdjustMethod = "BH")
+
+bitr_kegg(names(kegg_gene_list), fromType = "kegg", toType = "Path", organism = "hsa")
+
+kk3 <- enrichKEGG(gene = names(kegg_gene_list), org = 'hsa')
+kk3
 ```
 
 
